@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Scanner V22 - Optimized</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/mathjs/11.8.0/math.js"></script>
+    
+    <style>
+        :root { --brand-yellow: #ffcc00; --brand-red: #d40511; }
+        body { 
+            background: #000; margin: 0; height: 100vh; overflow: hidden; 
+            font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            touch-action: none; user-select: none; position: fixed; inset: 0; color: white;
+        }
+        .glass {
+            background: rgba(0,0,0,0.8); backdrop-filter: blur(12px);
+            border: 1px solid rgba(255,255,255,0.1); border-radius: 12px;
+        }
+        .btn-primary {
+            background: var(--brand-yellow); color: #000; font-weight: bold;
+            padding: 12px 24px; border-radius: 8px; transition: transform 0.1s;
+        }
+        .btn-primary:active { transform: scale(0.95); }
+        
+        canvas, video { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: contain; }
+        #drawCanvas { z-index: 10; }
+        
+        .mag {
+            position: absolute; width: 140px; height: 140px;
+            border: 3px solid var(--brand-yellow); border-radius: 50%;
+            overflow: hidden; display: none; pointer-events: none; z-index: 100;
+            box-shadow: 0 0 20px rgba(0,0,0,0.5);
+        }
+    </style>
+</head>
+<body>
+
+<div id="startScreen" class="absolute inset-0 z-[100] bg-slate-900 flex flex-col items-center justify-center p-6 text-center">
+    <div class="mb-8">
+        <h1 class="text-5xl font-black italic tracking-tighter">SCANNER <span class="text-[#ffcc00]">V22</span></h1>
+        <p class="text-slate-400 mt-2 uppercase tracking-widest text-sm">Pro Precision Tools</p>
+    </div>
+    
+    <button onclick="App.startCam()" class="btn-primary flex items-center gap-3 text-lg mb-4">
+        <i data-lucide="camera"></i> KAMERA STARTEN
+    </button>
+    
+    <label class="cursor-pointer text-sm text-yellow-500 underline font-semibold">
+        DATEI HOCHLADEN
+        <input type="file" class="hidden" accept="image/*" onchange="App.handleFile(this)">
+    </label>
+</div>
+
+<div id="app" class="hidden absolute inset-0">
+    <video id="videoInput" playsinline muted></video>
+    <canvas id="photoCanvas" class="hidden"></canvas>
+    <canvas id="drawCanvas"></canvas>
+    <div id="mag" class="mag"><canvas id="magC"></canvas></div>
+
+    <!-- UI Overlay -->
+    <div class="absolute inset-0 z-20 pointer-events-none flex flex-col p-4">
+        <!-- Header -->
+        <div id="header" class="glass p-4 pointer-events-auto flex justify-between items-center transition-all">
+            <div>
+                <span id="stepBadge" class="bg-red-600 text-[10px] px-2 py-0.5 rounded font-bold uppercase">Schritt 1</span>
+                <h2 id="stepTitle" class="text-lg font-bold">Referenz-A4</h2>
+            </div>
+            <button onclick="location.reload()" class="p-2 opacity-50"><i data-lucide="refresh-cw" class="w-5 h-5"></i></button>
+        </div>
+
+        <!-- Controls Bottom -->
+        <div class="mt-auto pointer-events-auto flex flex-col gap-4">
+            <div id="heightSliderWrap" class="glass p-4 hidden">
+                <div class="flex justify-between text-yellow-500 text-xs font-bold mb-2 uppercase">
+                    <span>Kamera-Höhe</span>
+                    <span id="heightVal">140 cm</span>
+                </div>
+                <input type="range" id="hSlider" min="50" max="250" value="140" class="w-full accent-[#ffcc00]">
+            </div>
+
+            <div class="flex justify-center items-center gap-4 pb-6">
+                <div id="camUI">
+                    <button onclick="App.snap()" class="w-20 h-20 rounded-full border-4 border-[#ffcc00] flex items-center justify-center bg-black/20">
+                        <div class="w-16 h-16 bg-[#ffcc00] rounded-full"></div>
+                    </button>
+                </div>
+                <div id="editUI" class="hidden flex gap-2 w-full max-w-sm">
+                    <button onclick="App.prevStep()" class="bg-white/10 p-4 rounded-xl"><i data-lucide="chevron-left"></i></button>
+                    <button onclick="App.nextStep()" id="nextBtn" class="btn-primary flex-1 py-4 text-sm uppercase tracking-widest">Weiter</button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Scripts -->
+<script async src="https://docs.opencv.org/4.8.0/opencv.js" onload="App.cvReady=true"></script>
+<script>
+const App = {
+    cvReady: false,
+    step: 0,
+    pts: { a4: [], top: [], bot: [] },
+    camHeight: 1400,
+    frozen: false,
+    drag: null,
+
+    init() {
+        this.els = {
+            vid: document.getElementById('videoInput'),
+            photo: document.getElementById('photoCanvas'),
+            draw: document.getElementById('drawCanvas'),
+            mag: document.getElementById('mag'),
+            magC: document.getElementById('magC'),
+            uiCam: document.getElementById('camUI'),
+            uiEdit: document.getElementById('editUI'),
+            badge: document.getElementById('stepBadge'),
+            title: document.getElementById('stepTitle'),
+            slider: document.getElementById('heightSliderWrap')
+        };
+        this.ctx = this.els.photo.getContext('2d');
+        this.drawCtx = this.els.draw.getContext('2d');
+        this.magCtx = this.els.magC.getContext('2d');
+
+        window.addEventListener('resize', () => this.resize());
+        this.els.draw.addEventListener('pointerdown', e => this.onPointerDown(e));
+        this.els.draw.addEventListener('pointermove', e => this.onPointerMove(e));
+        this.els.draw.addEventListener('pointerup', () => this.onPointerUp());
+        
+        document.getElementById('hSlider').oninput = (e) => {
+            this.camHeight = e.target.value * 10;
+            document.getElementById('heightVal').innerText = e.target.value + " cm";
+            this.render();
+        };
+
+        lucide.createIcons();
+        this.loop();
+    },
+
+    async startCam() {
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ 
+                video: { facingMode: 'environment', width: {ideal:1920}, height:{ideal:1080} } 
+            });
+            this.els.vid.srcObject = stream;
+            await this.els.vid.play();
+            document.getElementById('startScreen').classList.add('hidden');
+            document.getElementById('app').classList.remove('hidden');
+            this.resize();
+        } catch (err) { alert("Kamerafehler: " + err.message); }
+    },
+
+    resize() {
+        const w = window.innerWidth, h = window.innerHeight;
+        this.els.photo.width = this.els.draw.width = w;
+        this.els.photo.height = this.els.draw.height = h;
+        this.els.magC.width = this.els.magC.height = 300;
+    },
+
+    snap() {
+        this.frozen = true;
+        const w = this.els.draw.width, h = this.els.draw.height;
+        this.ctx.drawImage(this.els.vid, 0, 0, w, h);
+        this.els.vid.classList.add('hidden');
+        this.els.photo.classList.remove('hidden');
+        if(this.els.vid.srcObject) this.els.vid.srcObject.getTracks().forEach(t => t.stop());
+        
+        this.autoDetectA4();
+        this.setStep(1);
+    },
+
+    autoDetectA4() {
+        const w = this.els.draw.width, h = this.els.draw.height;
+        // Fallback: Default Punkte in A4 Proportion
+        this.pts.a4 = [
+            {x: w*0.3, y: h*0.3}, {x: w*0.7, y: h*0.3},
+            {x: w*0.7, y: h*0.7}, {x: w*0.3, y: h*0.7}
+        ];
+        // Hier könnte die OpenCV Erkennung optimiert werden (Downscaling für Speed)
+    },
+
+    setStep(s) {
+        this.step = s;
+        const steps = [
+            { t: "Live", b: "Schritt 0" },
+            { t: "Referenz-A4", b: "Schritt 1" },
+            { t: "Paket oben", b: "Schritt 2" },
+            { t: "Paket Boden", b: "Schritt 3" },
+            { t: "Ergebnis", b: "Fertig" }
+        ];
+        this.els.badge.innerText = steps[s].b;
+        this.els.title.innerText = steps[s].t;
+        
+        this.els.uiCam.classList.toggle('hidden', s !== 0);
+        this.els.uiEdit.classList.toggle('hidden', s === 0);
+        this.els.slider.classList.toggle('hidden', s !== 3);
+        
+        if(s === 2 && this.pts.top.length === 0) {
+            this.pts.top = this.pts.a4.map(p => ({x: p.x, y: p.y - 100}));
+        }
+        if(s === 3 && this.pts.bot.length === 0) {
+            this.pts.bot = this.pts.top.map(p => ({x: p.x, y: p.y + 150}));
+        }
+        
+        document.getElementById('nextBtn').innerText = (s === 3) ? "Berechnen" : "Weiter";
+        lucide.createIcons();
+    },
+
+    nextStep() { if(this.step < 4) this.setStep(this.step + 1); },
+    prevStep() { if(this.step > 1) this.setStep(this.step - 1); },
+
+    onPointerDown(e) {
+        if(this.step === 0 || this.step === 4) return;
+        const p = {x: e.clientX, y: e.clientY};
+        const currentPts = this.step === 1 ? this.pts.a4 : (this.step === 2 ? this.pts.top : this.pts.bot);
+        
+        currentPts.forEach((pt, i) => {
+            if(Math.hypot(pt.x - p.x, pt.y - p.y) < 40) {
+                this.drag = { list: currentPts, idx: i };
+            }
+        });
+    },
+
+    onPointerMove(e) {
+        if(!this.drag) return;
+        const p = {x: e.clientX, y: e.clientY};
+        this.drag.list[this.drag.idx] = p;
+        this.showMag(p);
+    },
+
+    onPointerUp() { 
+        this.drag = null; 
+        this.els.mag.style.display = 'none'; 
+    },
+
+    showMag(p) {
+        this.els.mag.style.display = 'block';
+        this.els.mag.style.left = `${p.x - 70}px`;
+        this.els.mag.style.top = `${p.y - 160}px`;
+        
+        const z = 2, s = 300 / z;
+        this.magCtx.drawImage(this.els.photo, p.x - s/2, p.y - s/2, s, s, 0, 0, 300, 300);
+        this.magCtx.strokeStyle = '#ffcc00';
+        this.magCtx.lineWidth = 2;
+        this.magCtx.beginPath();
+        this.magCtx.moveTo(150, 0); this.magCtx.lineTo(150, 300);
+        this.magCtx.moveTo(0, 150); this.magCtx.lineTo(300, 150);
+        this.magCtx.stroke();
+    },
+
+    loop() {
+        this.render();
+        requestAnimationFrame(() => this.loop());
+    },
+
+    render() {
+        const ctx = this.drawCtx;
+        ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+        
+        if(!this.frozen) return;
+
+        // Dim background
+        ctx.fillStyle = "rgba(0,0,0,0.3)";
+        ctx.fillRect(0,0, ctx.canvas.width, ctx.canvas.height);
+
+        if(this.step >= 1) this.drawPoly(this.pts.a4, '#ffcc00', this.step === 1);
+        if(this.step >= 2) this.drawPoly(this.pts.top, '#22c55e', this.step === 2);
+        if(this.step === 3) this.drawLegs();
+        if(this.step === 4) this.drawResult();
+    },
+
+    drawPoly(pts, col, active) {
+        const ctx = this.drawCtx;
+        ctx.beginPath();
+        ctx.moveTo(pts[0].x, pts[0].y);
+        pts.forEach(p => ctx.lineTo(p.x, p.y));
+        ctx.closePath();
+        ctx.strokeStyle = col;
+        ctx.lineWidth = 3;
+        ctx.stroke();
+        ctx.fillStyle = col + "33";
+        ctx.fill();
+        
+        if(active) {
+            pts.forEach(p => {
+                ctx.beginPath(); ctx.arc(p.x, p.y, 10, 0, 7);
+                ctx.fillStyle = "white"; ctx.fill();
+                ctx.strokeStyle = col; ctx.stroke();
+            });
+        }
+    },
+
+    drawLegs() {
+        this.pts.top.forEach((p, i) => {
+            const b = this.pts.bot[i];
+            this.drawCtx.beginPath();
+            this.drawCtx.setLineDash([5, 5]);
+            this.drawCtx.moveTo(p.x, p.y);
+            this.drawCtx.lineTo(b.x, b.y);
+            this.drawCtx.strokeStyle = "red";
+            this.drawCtx.stroke();
+            this.drawCtx.setLineDash([]);
+            
+            this.drawCtx.beginPath(); this.drawCtx.arc(b.x, b.y, 12, 0, 7);
+            this.drawCtx.fillStyle = "red"; this.drawCtx.fill();
+        });
+    },
+
+    drawResult() {
+        // Hier kommt deine Expansion-Berechnungs-Logik rein
+        const ctx = this.drawCtx;
+        const cx = ctx.canvas.width / 2;
+        const cy = ctx.canvas.height / 2;
+
+        ctx.fillStyle = "rgba(0,0,0,0.85)";
+        ctx.roundRect(cx - 120, cy - 80, 240, 160, 15);
+        ctx.fill();
+        
+        ctx.textAlign = "center";
+        ctx.fillStyle = "#ffcc00";
+        ctx.font = "bold 24px Arial";
+        ctx.fillText("ERGEBNIS", cx, cy - 40);
+        ctx.fillStyle = "white";
+        ctx.font = "bold 32px Arial";
+        ctx.fillText("30 x 20 x 15 cm", cx, cy + 20);
+    }
+};
+
+App.init();
+</script>
+</body>
+</html>
